@@ -235,8 +235,8 @@ trait JoinSelectionHelper {
       canBroadcastBySize(right, conf) && !hintToNotBroadcastRight(hint)
     }
     getBuildSide(
-      canBuildLeft(joinType) && buildLeft,
-      canBuildRight(joinType) && buildRight,
+      canBuildBroadcastLeft(joinType) && buildLeft,
+      canBuildBroadcastRight(joinType) && buildRight,
       left,
       right
     )
@@ -260,8 +260,8 @@ trait JoinSelectionHelper {
       canBuildLocalHashMapBySize(right, conf) && muchSmaller(right, left)
     }
     getBuildSide(
-      canBuildLeft(joinType) && buildLeft,
-      canBuildRight(joinType) && buildRight,
+      canBuildShuffledHashJoinLeft(joinType) && buildLeft,
+      canBuildShuffledHashJoinRight(joinType) && buildRight,
       left,
       right
     )
@@ -278,18 +278,40 @@ trait JoinSelectionHelper {
     plan.stats.sizeInBytes >= 0 && plan.stats.sizeInBytes <= conf.autoBroadcastJoinThreshold
   }
 
-  def canBuildLeft(joinType: JoinType): Boolean = {
+  def canBuildBroadcastLeft(joinType: JoinType): Boolean = {
     joinType match {
       case _: InnerLike | RightOuter => true
       case _ => false
     }
   }
 
-  def canBuildRight(joinType: JoinType): Boolean = {
+  def canBuildBroadcastRight(joinType: JoinType): Boolean = {
     joinType match {
       case _: InnerLike | LeftOuter | LeftSemi | LeftAnti | _: ExistenceJoin => true
       case _ => false
     }
+  }
+
+  def canBuildShuffledHashJoinLeft(joinType: JoinType): Boolean = {
+    joinType match {
+      case _: InnerLike | RightOuter | FullOuter => true
+      case _ => false
+    }
+  }
+
+  def canBuildShuffledHashJoinRight(joinType: JoinType): Boolean = {
+    joinType match {
+      case _: InnerLike | LeftOuter | FullOuter |
+           LeftSemi | LeftAnti | _: ExistenceJoin => true
+      case _ => false
+    }
+  }
+
+  def canPlanAsBroadcastHashJoin(join: Join, conf: SQLConf): Boolean = {
+    getBroadcastBuildSide(join.left, join.right, join.joinType,
+      join.hint, hintOnly = true, conf).isDefined ||
+      getBroadcastBuildSide(join.left, join.right, join.joinType,
+        join.hint, hintOnly = false, conf).isDefined
   }
 
   def hintToBroadcastLeft(hint: JoinHint): Boolean = {

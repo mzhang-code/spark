@@ -237,10 +237,8 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext with Eventually {
 
   test("aggregate") {
     val pairs = sc.makeRDD(Seq(("a", 1), ("b", 2), ("a", 2), ("c", 5), ("a", 3)))
-    type StringMap = HashMap[String, Int]
-    val emptyMap = new StringMap {
-      override def default(key: String): Int = 0
-    }
+    type StringMap = scala.collection.mutable.Map[String, Int]
+    val emptyMap = HashMap[String, Int]().withDefaultValue(0).asInstanceOf[StringMap]
     val mergeElement: (StringMap, (String, Int)) => StringMap = (map, pair) => {
       map(pair._1) += pair._2
       map
@@ -1104,7 +1102,7 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext with Eventually {
     }
   }
 
-  test("RDD.partitions() fails fast when partitions indicies are incorrect (SPARK-13021)") {
+  test("RDD.partitions() fails fast when partitions indices are incorrect (SPARK-13021)") {
     class BadRDD[T: ClassTag](prev: RDD[T]) extends RDD[T](prev) {
 
       override def compute(part: Partition, context: TaskContext): Iterator[T] = {

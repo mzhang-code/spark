@@ -333,7 +333,7 @@ private[spark] object JsonProtocol {
   def accumulablesToJson(accumulables: Iterable[AccumulableInfo]): JArray = {
     JArray(accumulables
         .filterNot(_.name.exists(accumulableExcludeList.contains))
-        .toList.map(accumulableInfoToJson))
+        .toList.sortBy(_.id).map(accumulableInfoToJson))
   }
 
   def accumulableInfoToJson(accumulableInfo: AccumulableInfo): JValue = {
@@ -757,7 +757,7 @@ private[spark] object JsonProtocol {
 
   def taskResourceRequestMapFromJson(json: JValue): Map[String, TaskResourceRequest] = {
     val jsonFields = json.asInstanceOf[JObject].obj
-    jsonFields.map { case JField(k, v) =>
+    jsonFields.collect { case JField(k, v) =>
       val req = taskResourceRequestFromJson(v)
       (k, req)
     }.toMap
@@ -765,7 +765,7 @@ private[spark] object JsonProtocol {
 
   def executorResourceRequestMapFromJson(json: JValue): Map[String, ExecutorResourceRequest] = {
     val jsonFields = json.asInstanceOf[JObject].obj
-    jsonFields.map { case JField(k, v) =>
+    jsonFields.collect { case JField(k, v) =>
       val req = executorResourceRequestFromJson(v)
       (k, req)
     }.toMap
@@ -1229,7 +1229,7 @@ private[spark] object JsonProtocol {
 
   def resourcesMapFromJson(json: JValue): Map[String, ResourceInformation] = {
     val jsonFields = json.asInstanceOf[JObject].obj
-    jsonFields.map { case JField(k, v) =>
+    jsonFields.collect { case JField(k, v) =>
       val resourceInfo = ResourceInformation.parseJson(v)
       (k, resourceInfo)
     }.toMap
@@ -1241,7 +1241,7 @@ private[spark] object JsonProtocol {
 
   def mapFromJson(json: JValue): Map[String, String] = {
     val jsonFields = json.asInstanceOf[JObject].obj
-    jsonFields.map { case JField(k, JString(v)) => (k, v) }.toMap
+    jsonFields.collect { case JField(k, JString(v)) => (k, v) }.toMap
   }
 
   def propertiesFromJson(json: JValue): Properties = {

@@ -156,6 +156,7 @@ class StringFunctionsSuite extends QueryTest with SharedSparkSession {
 
   test("non-matching optional group") {
     val df = Seq(Tuple1("aaaac")).toDF("s")
+
     checkAnswer(
       df.select(regexp_extract($"s", "(foo)", 1)),
       Row("")

@@ -20,6 +20,9 @@ package org.apache.spark.sql.catalyst.util
 import java.time.{DateTimeException, Instant, LocalDateTime, LocalTime}
 import java.util.concurrent.TimeUnit
 
+import org.apache.commons.lang3.{JavaVersion, SystemUtils}
+import org.scalatest.matchers.should.Matchers._
+
 import org.apache.spark.SparkUpgradeException
 import org.apache.spark.sql.catalyst.util.DateTimeTestUtils._
 import org.apache.spark.sql.catalyst.util.DateTimeUtils._
@@ -353,9 +356,14 @@ class TimestampFormatterSuite extends DatetimeFormatterSuite {
       val micros1 = formatter.parse("2009-12-12 00 am")
       assert(micros1 === date(2009, 12, 12))
 
+      // JDK-8223773: DateTimeFormatter Fails to throw an Exception on Invalid HOUR_OF_AMPM
       // For `KK`, "12:00:00 am" is the same as "00:00:00 pm".
-      val micros2 = formatter.parse("2009-12-12 12 am")
-      assert(micros2 === date(2009, 12, 12, 12))
+      if (SystemUtils.isJavaVersionAtLeast(JavaVersion.JAVA_13)) {
+        intercept[DateTimeException](formatter.parse("2009-12-12 12 am"))
+      } else {
+        val micros2 = formatter.parse("2009-12-12 12 am")
+        assert(micros2 === date(2009, 12, 12, 12))
+      }
 
       val micros3 = formatter.parse("2009-12-12 00 pm")
       assert(micros3 === date(2009, 12, 12, 12))
@@ -434,5 +442,15 @@ class TimestampFormatterSuite extends DatetimeFormatterSuite {
     } else {
       assert(formatter.format(date(1970, 4, 10)) == "100")
     }
+  }
+
+  test("SPARK-32424: avoid silent data change when timestamp overflows") {
+    val formatter = TimestampFormatter("y", UTC, isParsing = true)
+    assert(formatter.parse("294247") === date(294247))
+    assert(formatter.parse("-290307") === date(-290307))
+    val e1 = intercept[ArithmeticException](formatter.parse("294248"))
+    assert(e1.getMessage === "long overflow")
+    val e2 = intercept[ArithmeticException](formatter.parse("-290308"))
+    assert(e2.getMessage === "long overflow")
   }
 }

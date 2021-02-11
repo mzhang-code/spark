@@ -19,7 +19,10 @@ package org.apache.spark.sql.jdbc
 
 import java.math.BigDecimal
 import java.sql.{Date, DriverManager, SQLException, Timestamp}
+import java.time.{Instant, LocalDate}
 import java.util.{Calendar, GregorianCalendar, Properties}
+
+import scala.collection.JavaConverters._
 
 import org.h2.jdbc.JdbcSQLException
 import org.scalatest.{BeforeAndAfter, PrivateMethodTester}
@@ -71,7 +74,10 @@ class JDBCSuite extends QueryTest
     }
   }
 
-  before {
+  val defaultMetadata = new MetadataBuilder().putLong("scale", 0).build()
+
+  override def beforeAll(): Unit = {
+    super.beforeAll()
     Utils.classForName("org.h2.Driver")
     // Extra properties that will be specified for our database. We need these to test
     // usage of parameters from OPTIONS clause in queries.
@@ -273,8 +279,9 @@ class JDBCSuite extends QueryTest
     // Untested: IDENTITY, OTHER, UUID, ARRAY, and GEOMETRY types.
   }
 
-  after {
+  override def afterAll(): Unit = {
     conn.close()
+    super.afterAll()
   }
 
   // Check whether the tables are fetched in the expected degree of parallelism
@@ -621,7 +628,19 @@ class JDBCSuite extends QueryTest
     assert(cal.get(Calendar.HOUR) === 11)
     assert(cal.get(Calendar.MINUTE) === 22)
     assert(cal.get(Calendar.SECOND) === 33)
+    assert(cal.get(Calendar.MILLISECOND) === 543)
     assert(rows(0).getAs[java.sql.Timestamp](2).getNanos === 543543000)
+  }
+
+  test("SPARK-34357: test TIME types") {
+    val rows = spark.read.jdbc(
+      urlWithUserAndPass, "TEST.TIMETYPES", new Properties()).collect()
+    val cachedRows = spark.read.jdbc(urlWithUserAndPass, "TEST.TIMETYPES", new Properties())
+      .cache().collect()
+    val expectedTimeAtEpoch = java.sql.Timestamp.valueOf("1970-01-01 12:34:56.0")
+    assert(rows(0).getAs[java.sql.Timestamp](0) === expectedTimeAtEpoch)
+    assert(rows(1).getAs[java.sql.Timestamp](0) === expectedTimeAtEpoch)
+    assert(cachedRows(0).getAs[java.sql.Timestamp](0) === expectedTimeAtEpoch)
   }
 
   test("test DATE types") {
@@ -694,7 +713,7 @@ class JDBCSuite extends QueryTest
   test("Remap types via JdbcDialects") {
     JdbcDialects.registerDialect(testH2Dialect)
     val df = spark.read.jdbc(urlWithUserAndPass, "TEST.PEOPLE", new Properties())
-    assert(df.schema.filter(_.dataType != org.apache.spark.sql.types.StringType).isEmpty)
+    assert(!df.schema.exists(_.dataType != org.apache.spark.sql.types.StringType))
     val rows = df.collect()
     assert(rows(0).get(0).isInstanceOf[String])
     assert(rows(0).get(1).isInstanceOf[String])
@@ -766,9 +785,14 @@ class JDBCSuite extends QueryTest
   }
 
   test("Dialect unregister") {
-    JdbcDialects.registerDialect(testH2Dialect)
-    JdbcDialects.unregisterDialect(testH2Dialect)
-    assert(JdbcDialects.get(urlWithUserAndPass) == NoopDialect)
+    JdbcDialects.unregisterDialect(H2Dialect)
+    try {
+      JdbcDialects.registerDialect(testH2Dialect)
+      JdbcDialects.unregisterDialect(testH2Dialect)
+      assert(JdbcDialects.get(urlWithUserAndPass) == NoopDialect)
+    } finally {
+      JdbcDialects.registerDialect(H2Dialect)
+    }
   }
 
   test("Aggregated dialects") {
@@ -849,6 +873,8 @@ class JDBCSuite extends QueryTest
     assert(Postgres.getCatalystType(java.sql.Types.OTHER, "jsonb", 1, null) === Some(StringType))
     assert(Postgres.getCatalystType(java.sql.Types.ARRAY, "_numeric", 0, md) ==
       Some(ArrayType(DecimalType.SYSTEM_DEFAULT)))
+    assert(Postgres.getCatalystType(java.sql.Types.ARRAY, "_bpchar", 64, md) ==
+      Some(ArrayType(StringType)))
     assert(Postgres.getJDBCType(FloatType).map(_.databaseTypeDefinition).get == "FLOAT4")
     assert(Postgres.getJDBCType(DoubleType).map(_.databaseTypeDefinition).get == "FLOAT8")
     assert(Postgres.getJDBCType(ByteType).map(_.databaseTypeDefinition).get == "SMALLINT")
@@ -992,6 +1018,19 @@ class JDBCSuite extends QueryTest
     assert(rows(0).getAs[java.sql.Date](1) === java.sql.Date.valueOf("1996-01-01"))
     assert(rows(0).getAs[java.sql.Timestamp](2)
       === java.sql.Timestamp.valueOf("2002-02-20 11:22:33.543543"))
+  }
+
+  test("SPARK-33867: Test DataFrame.where for LocalDate and Instant") {
+    // Test for SPARK-33867
+    val timestamp = Instant.parse("2001-02-20T11:22:33.543543Z")
+    val date = LocalDate.parse("1995-01-01")
+    withSQLConf(SQLConf.DATETIME_JAVA8API_ENABLED.key -> "true") {
+      val jdbcDf = spark.read.jdbc(urlWithUserAndPass, "TEST.TIMETYPES", new Properties())
+      val rows = jdbcDf.where($"B" > date && $"C" > timestamp).collect()
+      assert(rows(0).getAs[LocalDate](1) === LocalDate.parse("1996-01-01"))
+      // 8 hour difference since saved time was America/Los_Angeles and Instant is GMT
+      assert(rows(0).getAs[Instant](2) === Instant.parse("2002-02-20T19:22:33.543543Z"))
+    }
   }
 
   test("test credentials in the properties are not in plan output") {
@@ -1180,7 +1219,10 @@ class JDBCSuite extends QueryTest
 
   test("SPARK-16387: Reserved SQL words are not escaped by JDBC writer") {
     val df = spark.createDataset(Seq("a", "b", "c")).toDF("order")
-    val schema = JdbcUtils.schemaString(df, "jdbc:mysql://localhost:3306/temp")
+    val schema = JdbcUtils.schemaString(
+      df.schema,
+      df.sqlContext.conf.caseSensitiveAnalysis,
+      "jdbc:mysql://localhost:3306/temp")
     assert(schema.contains("`order` TEXT"))
   }
 
@@ -1214,8 +1256,8 @@ class JDBCSuite extends QueryTest
   }
 
   test("SPARK-16848: jdbc API throws an exception for user specified schema") {
-    val schema = StructType(Seq(
-      StructField("name", StringType, false), StructField("theid", IntegerType, false)))
+    val schema = StructType(Seq(StructField("name", StringType, false, defaultMetadata),
+      StructField("theid", IntegerType, false, defaultMetadata)))
     val parts = Array[String]("THEID < 2", "THEID >= 2")
     val e1 = intercept[AnalysisException] {
       spark.read.schema(schema).jdbc(urlWithUserAndPass, "TEST.PEOPLE", parts, new Properties())
@@ -1235,7 +1277,9 @@ class JDBCSuite extends QueryTest
     props.put("customSchema", customSchema)
     val df = spark.read.jdbc(urlWithUserAndPass, "TEST.PEOPLE", parts, props)
     assert(df.schema.size === 2)
-    assert(df.schema === CatalystSqlParser.parseTableSchema(customSchema))
+    val expectedSchema = new StructType(CatalystSqlParser.parseTableSchema(customSchema).map(
+      f => StructField(f.name, f.dataType, f.nullable, defaultMetadata)).toArray)
+    assert(df.schema === expectedSchema)
     assert(df.count() === 3)
   }
 
@@ -1251,7 +1295,9 @@ class JDBCSuite extends QueryTest
         """.stripMargin.replaceAll("\n", " "))
       val df = sql("select * from people_view")
       assert(df.schema.length === 2)
-      assert(df.schema === CatalystSqlParser.parseTableSchema(customSchema))
+      val expectedSchema = new StructType(CatalystSqlParser.parseTableSchema(customSchema)
+        .map(f => StructField(f.name, f.dataType, f.nullable, defaultMetadata)).toArray)
+      assert(df.schema === expectedSchema)
       assert(df.count() === 3)
     }
   }
@@ -1302,7 +1348,8 @@ class JDBCSuite extends QueryTest
     testJdbcOptions(new JDBCOptions(parameters))
     testJdbcOptions(new JDBCOptions(CaseInsensitiveMap(parameters)))
     // test add/remove key-value from the case-insensitive map
-    var modifiedParameters = CaseInsensitiveMap(Map.empty) ++ parameters
+    var modifiedParameters =
+      (CaseInsensitiveMap(Map.empty) ++ parameters).asInstanceOf[Map[String, String]]
     testJdbcOptions(new JDBCOptions(modifiedParameters))
     modifiedParameters -= "dbtable"
     assert(modifiedParameters.get("dbTAblE").isEmpty)
@@ -1365,8 +1412,8 @@ class JDBCSuite extends QueryTest
     }
 
   test("jdbc data source shouldn't have unnecessary metadata in its schema") {
-    val schema = StructType(Seq(
-      StructField("NAME", StringType, true), StructField("THEID", IntegerType, true)))
+    val schema = StructType(Seq(StructField("NAME", StringType, true, defaultMetadata),
+      StructField("THEID", IntegerType, true, defaultMetadata)))
 
     val df = spark.read.format("jdbc")
       .option("Url", urlWithUserAndPass)
@@ -1403,7 +1450,7 @@ class JDBCSuite extends QueryTest
   }
 
   test("SPARK-24327 verify and normalize a partition column based on a JDBC resolved schema") {
-    def testJdbcParitionColumn(partColName: String, expectedColumnName: String): Unit = {
+    def testJdbcPartitionColumn(partColName: String, expectedColumnName: String): Unit = {
       val df = spark.read.format("jdbc")
         .option("url", urlWithUserAndPass)
         .option("dbtable", "TEST.PARTITION")
@@ -1424,16 +1471,16 @@ class JDBCSuite extends QueryTest
       }
     }
 
-    testJdbcParitionColumn("THEID", "THEID")
-    testJdbcParitionColumn("\"THEID\"", "THEID")
+    testJdbcPartitionColumn("THEID", "THEID")
+    testJdbcPartitionColumn("\"THEID\"", "THEID")
     withSQLConf(SQLConf.CASE_SENSITIVE.key -> "false") {
-      testJdbcParitionColumn("ThEiD", "THEID")
+      testJdbcPartitionColumn("ThEiD", "THEID")
     }
-    testJdbcParitionColumn("THE ID", "THE ID")
+    testJdbcPartitionColumn("THE ID", "THE ID")
 
     def testIncorrectJdbcPartitionColumn(partColName: String): Unit = {
       val errMsg = intercept[AnalysisException] {
-        testJdbcParitionColumn(partColName, "THEID")
+        testJdbcPartitionColumn(partColName, "THEID")
       }.getMessage
       assert(errMsg.contains(s"User-defined partition column $partColName not found " +
         "in the JDBC relation:"))
@@ -1714,5 +1761,24 @@ class JDBCSuite extends QueryTest
     val parts = Array[String]("THEID = 2")
     jdbcDF = sqlContext.jdbc(urlWithUserAndPass, "TEST.PEOPLE", parts)
     checkAnswer(jdbcDF, Row("mary", 2) :: Nil)
+  }
+
+  test("SPARK-32364: JDBCOption constructor") {
+    val extraOptions = CaseInsensitiveMap[String](Map("UrL" -> "url1", "dBTable" -> "table1"))
+    val connectionProperties = new Properties()
+    connectionProperties.put("url", "url2")
+    connectionProperties.put("dbtable", "table2")
+
+    // connection property should override the options in extraOptions
+    val params = extraOptions ++ connectionProperties.asScala
+    assert(params.size == 2)
+    assert(params.get("uRl").contains("url2"))
+    assert(params.get("DbtaBle").contains("table2"))
+
+    // JDBCOptions constructor parameter should overwrite the existing conf
+    val options = new JDBCOptions(url, "table3", params)
+    assert(options.asProperties.size == 2)
+    assert(options.asProperties.get("url") == url)
+    assert(options.asProperties.get("dbtable") == "table3")
   }
 }

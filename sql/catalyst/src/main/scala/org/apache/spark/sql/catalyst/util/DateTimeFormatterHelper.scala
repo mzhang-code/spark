@@ -226,8 +226,8 @@ private object DateTimeFormatterHelper {
       // string at res(0). So when the first element here is empty string we do not need append `'`
       // literal to the DateTimeFormatterBuilder.
       case ("", idx) if idx != 0 => builder.appendLiteral("'")
-      case (pattenPart, idx) if idx % 2 == 0 =>
-        var rest = pattenPart
+      case (patternPart, idx) if idx % 2 == 0 =>
+        var rest = patternPart
         while (rest.nonEmpty) {
           rest match {
             case extractor(prefix, secondFraction, suffix) =>
@@ -296,7 +296,9 @@ private object DateTimeFormatterHelper {
       // unchecked `ArrayIndexOutOfBoundsException` by the `NumberPrinterParser` for formatting. It
       // makes the call side difficult to handle exceptions and easily leads to silent data change
       // because of the exceptions being suppressed.
-      Seq("y").map(_ * 11)
+      // SPARK-32424: The max year that we can actually handle is 6 digits, otherwise, it will
+      // overflow
+      Seq("y").map(_ * 7)
   }.toSet
 
   /**

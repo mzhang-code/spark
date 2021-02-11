@@ -87,9 +87,13 @@ class JacksonParser(
   private def makeStructRootConverter(st: StructType): JsonParser => Iterable[InternalRow] = {
     val elementConverter = makeConverter(st)
     val fieldConverters = st.map(_.dataType).map(makeConverter).toArray
-    val jsonFilters = new JsonFilters(filters, st)
+    val jsonFilters = if (SQLConf.get.jsonFilterPushDown) {
+      new JsonFilters(filters, st)
+    } else {
+      new NoopFilters
+    }
     (parser: JsonParser) => parseJsonToken[Iterable[InternalRow]](parser, st) {
-      case START_OBJECT => convertObject(parser, st, fieldConverters, jsonFilters)
+      case START_OBJECT => convertObject(parser, st, fieldConverters, jsonFilters, isRoot = true)
         // SPARK-3308: support reading top level JSON arrays and take every element
         // in such an array as a row
         //
@@ -379,7 +383,8 @@ class JacksonParser(
       parser: JsonParser,
       schema: StructType,
       fieldConverters: Array[ValueConverter],
-      structFilters: StructFilters = new NoopFilters()): Option[InternalRow] = {
+      structFilters: StructFilters = new NoopFilters(),
+      isRoot: Boolean = false): Option[InternalRow] = {
     val row = new GenericInternalRow(schema.length)
     var badRecordException: Option[Throwable] = None
     var skipRow = false
@@ -393,7 +398,7 @@ class JacksonParser(
             skipRow = structFilters.skipRow(row, index)
           } catch {
             case e: SparkUpgradeException => throw e
-            case NonFatal(e) =>
+            case NonFatal(e) if isRoot =>
               badRecordException = badRecordException.orElse(Some(e))
               parser.skipChildren()
           }
@@ -461,7 +466,7 @@ class JacksonParser(
           case null => None
           case _ => rootConverter.apply(parser) match {
             case null => throw new RuntimeException("Root converter returned null")
-            case rows => rows
+            case rows => rows.toSeq
           }
         }
       }
